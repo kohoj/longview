@@ -27,7 +27,6 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     env:
-      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
       MACOSX_DEPLOYMENT_TARGET: "14.0"
       LONGVIEW_EXPECTED_ARCH: ${{ matrix.architecture }}
     steps:
@@ -37,7 +36,7 @@ jobs:
           persist-credentials: false
 
       - name: Verify public project
-        shell: zsh
+        shell: /bin/zsh {0}
         run: |
           set -euo pipefail
           sw_vers

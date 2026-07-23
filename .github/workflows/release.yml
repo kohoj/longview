@@ -16,7 +16,6 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 20
     env:
-      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
       MACOSX_DEPLOYMENT_TARGET: "14.0"
       LONGVIEW_EXPECTED_ARCH: arm64
     steps:
@@ -28,7 +27,7 @@ jobs:
           ref: ${{ inputs.tag }}
 
       - name: Validate tag and version
-        shell: zsh
+        shell: /bin/zsh {0}
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
@@ -50,7 +49,7 @@ jobs:
           [[ "$RELEASE_TAG" == "v$version" ]]
 
       - name: Build deterministic source archive
-        shell: zsh
+        shell: /bin/zsh {0}
         env:
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
@@ -62,7 +61,7 @@ jobs:
           print -r -- "RELEASE_ARCHIVE=$archive" >> "$GITHUB_ENV"
 
       - name: Create draft release
-        shell: zsh
+        shell: /bin/zsh {0}
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
