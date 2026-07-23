@@ -7,6 +7,12 @@ public struct LongScreenshotStitchOutput {
     public let regionInPixels: CGRect
 }
 
+struct LongScreenshotMotionAnalysis: Equatable {
+    let overlap: Int
+    let score: Double
+    let viewportHeight: Int
+}
+
 public struct LongScreenshotStitcher {
     public init() {}
 
@@ -15,7 +21,8 @@ public struct LongScreenshotStitcher {
         direction: LongScreenshotDirection,
         region: LongScreenshotRegion,
         bundleIdentifier: String?,
-        pointPixelScale: CGFloat = 1
+        pointPixelScale: CGFloat = 1,
+        validatedCaptureOverlaps: [Int]? = nil
     ) throws -> LongScreenshotStitchOutput {
         guard let first = frames.first else {
             throw LongScreenshotError.invalidConfiguration
@@ -40,15 +47,27 @@ public struct LongScreenshotStitcher {
             try crop($0, to: layout.transcript)
         }
 
-        var overlaps: [Int] = []
-        if contentFrames.count > 1 {
+        let overlaps: [Int]
+        if let validatedCaptureOverlaps {
+            guard validatedCaptureOverlaps.count == contentFrames.count - 1 else {
+                throw LongScreenshotError.overlapUnavailable
+            }
+            overlaps =
+                direction == .up
+                ? Array(validatedCaptureOverlaps.reversed())
+                : validatedCaptureOverlaps
+        } else if contentFrames.count > 1 {
+            var detected: [Int] = []
             for index in 1..<contentFrames.count {
-                overlaps.append(
+                detected.append(
                     try bestOverlap(
                         older: contentFrames[index - 1],
                         newer: contentFrames[index]
                     ))
             }
+            overlaps = detected
+        } else {
+            overlaps = []
         }
 
         let result = try compose(
@@ -75,14 +94,30 @@ public struct LongScreenshotStitcher {
         bundleIdentifier: String?,
         pointPixelScale: CGFloat = 1
     ) -> Bool {
-        guard before.width == after.width, before.height == after.height else { return false }
+        analyzeMotion(
+            before: before,
+            after: after,
+            direction: direction,
+            region: region,
+            bundleIdentifier: bundleIdentifier,
+            pointPixelScale: pointPixelScale
+        ) != nil
+    }
+
+    func analyzeMotion(
+        before: CGImage,
+        after: CGImage,
+        direction: LongScreenshotDirection,
+        region: LongScreenshotRegion,
+        bundleIdentifier: String?,
+        pointPixelScale: CGFloat = 1
+    ) -> LongScreenshotMotionAnalysis? {
+        guard before.width == after.width, before.height == after.height else { return nil }
         let motionRegion: LongScreenshotRegion =
             if region == .automatic,
                 LongScreenshotProfileCatalog.contains(bundleIdentifier)
             {
                 .appProfile
-            } else if region == .automatic {
-                .fullWindow
             } else {
                 region
             }
@@ -98,28 +133,188 @@ public struct LongScreenshotStitcher {
             let beforeCrop = try? crop(before, to: layout.transcript),
             let afterCrop = try? crop(after, to: layout.transcript),
             meanSameCoordinateDifference(beforeCrop, afterCrop) >= 1.2
-        else { return false }
+        else { return nil }
 
         let older = direction == .up ? afterCrop : beforeCrop
         let newer = direction == .up ? beforeCrop : afterCrop
         guard let match = try? bestOverlapMatch(older: older, newer: newer) else {
-            return false
+            return nil
         }
-        return match.score <= 24
-            && match.overlap >= max(80, older.height / 6)
-            && match.overlap < older.height - 24
+        guard
+            match.score <= 24
+                && match.overlap >= max(80, older.height / 6)
+                && match.overlap < older.height - 24
+        else { return nil }
+        return LongScreenshotMotionAnalysis(
+            overlap: match.overlap,
+            score: match.score,
+            viewportHeight: older.height
+        )
     }
 
     func hasMatchingViewport(before: CGImage, after: CGImage) -> Bool {
         guard before.width == after.width,
             before.height == after.height
         else { return false }
-        return meanSameCoordinateDifference(before, after) <= 2.5
+        if meanSameCoordinateDifference(before, after) <= 2.5 {
+            return true
+        }
+        guard let match = viewportTranslation(before: before, after: after) else {
+            return false
+        }
+        return abs(match.displacement) <= 3 && match.score <= 24
+    }
+
+    func viewportTranslation(
+        before: CGImage,
+        after: CGImage
+    ) -> (displacement: Int, score: Double)? {
+        guard
+            let match = try? bestVerticalTranslation(
+                before: before,
+                after: after
+            )
+        else { return nil }
+        return (match.displacement, match.score)
     }
 
     private struct OverlapMatch {
         let score: Double
         let overlap: Int
+    }
+
+    private struct TranslationMatch {
+        let score: Double
+        let displacement: Int
+    }
+
+    private func bestVerticalTranslation(
+        before: CGImage,
+        after: CGImage
+    ) throws -> TranslationMatch {
+        let beforeFeatures = try FeatureImage(image: before)
+        let afterFeatures = try FeatureImage(image: after)
+        let background = medianBackground(beforeFeatures, afterFeatures)
+        let maximumDisplacement = min(
+            beforeFeatures.height - 24,
+            max(24, min(beforeFeatures.height / 3, 240))
+        )
+        guard maximumDisplacement > 0 else {
+            throw LongScreenshotError.captureDimensionsChanged
+        }
+
+        var coarse: [TranslationMatch] = []
+        for displacement in -maximumDisplacement...maximumDisplacement {
+            if let candidate = translationScore(
+                displacement: displacement,
+                before: beforeFeatures,
+                after: afterFeatures,
+                background: background,
+                rowStride: 8,
+                columnStride: 2,
+                minimumInformativeCount: 20
+            ) {
+                coarse.append(candidate)
+            }
+        }
+        coarse.sort { $0.score < $1.score }
+
+        var seeds = [0]
+        for candidate in coarse {
+            guard seeds.allSatisfy({ abs($0 - candidate.displacement) > 4 }) else {
+                continue
+            }
+            seeds.append(candidate.displacement)
+            if seeds.count == 9 { break }
+        }
+
+        var best: TranslationMatch?
+        for displacement in seeds {
+            guard
+                let candidate = translationScore(
+                    displacement: displacement,
+                    before: beforeFeatures,
+                    after: afterFeatures,
+                    background: background,
+                    rowStride: 2,
+                    columnStride: 1,
+                    minimumInformativeCount: 80
+                )
+            else { continue }
+            if best == nil || candidate.score < best!.score {
+                best = candidate
+            }
+        }
+        guard let best else { throw LongScreenshotError.overlapUnavailable }
+        return best
+    }
+
+    private func translationScore(
+        displacement: Int,
+        before: FeatureImage,
+        after: FeatureImage,
+        background: (UInt8, UInt8, UInt8),
+        rowStride: Int,
+        columnStride: Int,
+        minimumInformativeCount: Int
+    ) -> TranslationMatch? {
+        let beforeStart = max(0, -displacement)
+        let afterStart = max(0, displacement)
+        let rowCount = min(
+            before.height - beforeStart,
+            after.height - afterStart
+        )
+        guard rowCount > 0 else { return nil }
+
+        var differenceHistogram = [Int](repeating: 0, count: 81)
+        var informativeCount = 0
+        var offset = 0
+        while offset < rowCount {
+            let beforeRow = beforeStart + offset
+            let afterRow = afterStart + offset
+            var column = 0
+            while column < before.width {
+                let beforePixel = before.pixel(row: beforeRow, column: column)
+                let afterPixel = after.pixel(row: afterRow, column: column)
+                if isInformative(beforePixel, background)
+                    || isInformative(afterPixel, background)
+                {
+                    let delta =
+                        (abs(Int(beforePixel.0) - Int(afterPixel.0))
+                            + abs(Int(beforePixel.1) - Int(afterPixel.1))
+                            + abs(Int(beforePixel.2) - Int(afterPixel.2))) / 3
+                    differenceHistogram[min(delta, 80)] += 1
+                    informativeCount += 1
+                }
+                column += columnStride
+            }
+            offset += rowStride
+        }
+        guard informativeCount >= minimumInformativeCount else { return nil }
+        return TranslationMatch(
+            score: lowerTrimmedMean(
+                histogram: differenceHistogram,
+                count: informativeCount,
+                retainedFraction: 0.9
+            ),
+            displacement: displacement
+        )
+    }
+
+    private func lowerTrimmedMean(
+        histogram: [Int],
+        count: Int,
+        retainedFraction: Double
+    ) -> Double {
+        let retainedCount = max(1, Int((Double(count) * retainedFraction).rounded(.up)))
+        var remaining = retainedCount
+        var total = 0
+        for (difference, frequency) in histogram.enumerated() where remaining > 0 {
+            let accepted = min(remaining, frequency)
+            total += difference * accepted
+            remaining -= accepted
+        }
+        return Double(total) / Double(retainedCount)
     }
 
     private func bestOverlapMatch(older: CGImage, newer: CGImage) throws -> OverlapMatch {
@@ -134,43 +329,89 @@ public struct LongScreenshotStitcher {
         let maximum = min(older.height - 24, 1_200)
         guard minimum < maximum else { throw LongScreenshotError.overlapUnavailable }
 
-        var best: OverlapMatch?
+        var coarseMatches: [OverlapMatch] = []
         for overlap in minimum..<maximum {
-            var difference = 0.0
-            var informativeCount = 0
-            var row = 0
-            while row < overlap {
-                let oldRow = older.height - overlap + row
-                let newRow = row
-                var column = 0
-                while column < oldFeatures.width {
-                    let oldPixel = oldFeatures.pixel(row: oldRow, column: column)
-                    let newPixel = newFeatures.pixel(row: newRow, column: column)
-                    if isInformative(oldPixel, background)
-                        || isInformative(newPixel, background)
-                    {
-                        let delta =
-                            (abs(Int(oldPixel.0) - Int(newPixel.0))
-                                + abs(Int(oldPixel.1) - Int(newPixel.1))
-                                + abs(Int(oldPixel.2) - Int(newPixel.2))) / 3
-                        difference += Double(min(delta, 80))
-                        informativeCount += 1
-                    }
-                    column += 1
-                }
-                row += 2
+            if let candidate = overlapScore(
+                overlap: overlap,
+                older: oldFeatures,
+                newer: newFeatures,
+                background: background,
+                rowStride: 8,
+                columnStride: 2,
+                minimumInformativeCount: 20
+            ) {
+                coarseMatches.append(candidate)
             }
-            guard informativeCount >= 80 else { continue }
-            let candidate = OverlapMatch(
-                score: difference / Double(informativeCount),
-                overlap: overlap
-            )
+        }
+        coarseMatches.sort { $0.score < $1.score }
+
+        var coarseSeeds: [Int] = []
+        for candidate in coarseMatches {
+            guard coarseSeeds.allSatisfy({ abs($0 - candidate.overlap) > 8 }) else {
+                continue
+            }
+            coarseSeeds.append(candidate.overlap)
+            if coarseSeeds.count == 8 { break }
+        }
+
+        var best: OverlapMatch?
+        for overlap in coarseSeeds.sorted() {
+            guard
+                let candidate = overlapScore(
+                    overlap: overlap,
+                    older: oldFeatures,
+                    newer: newFeatures,
+                    background: background,
+                    rowStride: 2,
+                    columnStride: 1,
+                    minimumInformativeCount: 80
+                )
+            else { continue }
             if best == nil || candidate.score < best!.score {
                 best = candidate
             }
         }
         guard let best else { throw LongScreenshotError.overlapUnavailable }
         return best
+    }
+
+    private func overlapScore(
+        overlap: Int,
+        older: FeatureImage,
+        newer: FeatureImage,
+        background: (UInt8, UInt8, UInt8),
+        rowStride: Int,
+        columnStride: Int,
+        minimumInformativeCount: Int
+    ) -> OverlapMatch? {
+        var difference = 0.0
+        var informativeCount = 0
+        var row = 0
+        while row < overlap {
+            let oldRow = older.height - overlap + row
+            var column = 0
+            while column < older.width {
+                let oldPixel = older.pixel(row: oldRow, column: column)
+                let newPixel = newer.pixel(row: row, column: column)
+                if isInformative(oldPixel, background)
+                    || isInformative(newPixel, background)
+                {
+                    let delta =
+                        (abs(Int(oldPixel.0) - Int(newPixel.0))
+                            + abs(Int(oldPixel.1) - Int(newPixel.1))
+                            + abs(Int(oldPixel.2) - Int(newPixel.2))) / 3
+                    difference += Double(min(delta, 80))
+                    informativeCount += 1
+                }
+                column += columnStride
+            }
+            row += rowStride
+        }
+        guard informativeCount >= minimumInformativeCount else { return nil }
+        return OverlapMatch(
+            score: difference / Double(informativeCount),
+            overlap: overlap
+        )
     }
 
     private func crop(_ image: CGImage, to rect: CGRect) throws -> CGImage {

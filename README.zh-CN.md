@@ -66,14 +66,14 @@ longview --events longshot \
 --window-id UINT32                       精确 WindowServer ID
 --bundle-id ID                           bundle 筛选或默认窗口选择
 --max-frames 1...100                     默认 6
---pulses-per-step 1...240                默认 28
+--pulses-per-step 1...240                自适应初始步长；默认 28
 --direction up|down                      默认 up
 --focus-policy background-only|
                background-first|foreground
                                            默认 background-first
 --region auto|full|profile|x,y,w,h       坐标为 0...1 归一化矩形
 --scroll-point x,y                       默认 0.65,0.5
---settle-ms 100...5000                   默认 450
+--settle-ms 100...5000                   最大稳定等待；默认 450
 --no-stop-at-end                         不做无运动终止
 --force                                  原子替换已有文件
 ```
@@ -100,7 +100,9 @@ longview --events longshot \
 - PNG 只写 `--output`；成功拼接前不提交目标文件。
 - `SIGINT` / `SIGTERM` 返回 `canceled` / 130，并仍尝试恢复已修改状态。
 
-关键 result 字段包括：`scrollRoute`、`stopReason`、`captureRegion`、`detectedOverlaps`、`targetWasActivated`、`pointerWasMoved`、`viewportRestorationSucceeded` 与 `environmentRestorationSucceeded`。
+长图节奏由截图闭环控制：滚动事件数只是试探输入，持续 ScreenCaptureKit 流取代固定等待；只有稳定后且能够证明至少 24% 重叠的视口才会进入成图。重叠充足时自动加速，接近安全边界时自动减速。
+
+关键 result 字段包括：`scrollRoute`、`stopReason`、`captureSource`、`elapsedMilliseconds`、`effectivePixelsPerSecond`、`captureRegion`、`detectedOverlaps`、`targetWasActivated`、`pointerWasMoved`、`viewportRestorationSucceeded`、`focusRestorationSucceeded`、`pointerRestorationSucceeded` 与 `environmentRestorationSucceeded`。最后一项是焦点与指针恢复结果的合取。
 
 退出码：
 

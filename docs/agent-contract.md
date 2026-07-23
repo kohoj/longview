@@ -43,18 +43,29 @@ The final NDJSON line or single JSON object has:
   "result": {
     "outputPath": "/absolute/path/context.png",
     "capturedFrameCount": 3,
+    "captureSource": "screen-capture-stream",
+    "elapsedMilliseconds": 412,
+    "effectivePixelsPerSecond": 3890,
+    "finalPulsesPerStep": 72,
     "scrollRoute": "accessibility-value",
     "stopReason": "frame-limit-reached",
     "targetWasActivated": false,
     "pointerWasMoved": false,
     "viewportRestorationAttempted": true,
     "viewportRestorationSucceeded": true,
+    "focusRestorationSucceeded": true,
+    "pointerRestorationSucceeded": true,
     "environmentRestorationSucceeded": true
   }
 }
 ```
 
-`ok=true` means the artifact was generated and atomically committed. Agents must still inspect restoration booleans before beginning another external-state mutation.
+`ok=true` means the artifact was generated and atomically committed. Agents must still inspect restoration booleans before beginning another external-state mutation. `environmentRestorationSucceeded` is the conjunction of the independent focus and pointer receipts.
+
+`effectivePixelsPerSecond` measures the final artifact height against the entire
+capture transaction, including restoration and composition. `finalPulsesPerStep`
+is diagnostic only: agents should not use it as a future scroll distance because
+adaptive pacing is recalibrated from captured overlap on every run.
 
 Routes:
 

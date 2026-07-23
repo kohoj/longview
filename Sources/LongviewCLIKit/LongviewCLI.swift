@@ -109,6 +109,9 @@ public enum LongviewCLI {
                 targetScope: "shareable-layer-zero-window",
                 targetSelectors: ["window-id", "bundle-id", "frontmost-bundle"],
                 captureRoute: "ScreenCaptureKit.desktopIndependentWindow",
+                capturePacing: "capture-verified-adaptive",
+                frameSource: "ScreenCaptureKit.SCStream",
+                overlapPolicy: "online-validated-minimum-24-percent",
                 backgroundCapture: true,
                 backgroundScroll: "conditional-on-live-AX-scrollbar-or-app-honored-PID-event",
                 knownProfiles: LongScreenshotProfileCatalog.knownBundleIdentifiers,
@@ -124,6 +127,7 @@ public enum LongviewCLI {
                 frameRange: [1, 100],
                 pulsesPerStepRange: [1, 240],
                 settleMillisecondsRange: [100, 5_000],
+                settleMillisecondsSemantics: "maximum-frame-stability-wait",
                 outputFormat: "png",
                 restoration: "attempted-and-capture-verified",
                 limitations: [
@@ -286,7 +290,13 @@ public enum LongviewCLI {
             pointerWasMoved: captured.pointerWasMoved,
             viewportRestorationAttempted: captured.viewportRestorationAttempted,
             viewportRestorationSucceeded: captured.viewportRestorationSucceeded,
-            environmentRestorationSucceeded: captured.environmentRestorationSucceeded
+            environmentRestorationSucceeded: captured.environmentRestorationSucceeded,
+            focusRestorationSucceeded: captured.focusRestorationSucceeded,
+            pointerRestorationSucceeded: captured.pointerRestorationSucceeded,
+            captureSource: captured.captureSource,
+            elapsedMilliseconds: captured.elapsedMilliseconds,
+            effectivePixelsPerSecond: captured.effectivePixelsPerSecond,
+            finalPulsesPerStep: captured.finalPulsesPerStep
         )
         try output.success(command: "longshot", result: result)
     }
