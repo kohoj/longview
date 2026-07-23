@@ -1,6 +1,6 @@
 import CoreGraphics
 import Foundation
-import ScreenCaptureKit
+@preconcurrency import ScreenCaptureKit
 
 @MainActor
 public struct WindowTargetResolver {
