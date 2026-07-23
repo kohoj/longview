@@ -37,6 +37,13 @@ longview_binary_version() {
         | sed -n 's/.*"version":"\([^"]*\)".*/\1/p'
 }
 
+longview_sign_locally() {
+    codesign --force --sign - --timestamp=none "$1" >/dev/null 2>&1 \
+        || longview_die "failed to apply a local ad-hoc signature to $1"
+    codesign --verify --strict "$1" >/dev/null 2>&1 \
+        || longview_die "local ad-hoc signature verification failed for $1"
+}
+
 longview_receipt_value() {
     plutil -extract "$2" raw -o - "$1" 2>/dev/null
 }

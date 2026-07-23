@@ -10,8 +10,10 @@ cd longview
 longview doctor --pretty
 ```
 
-The installer validates macOS, Swift, the release build, local code signature,
-CLI version protocol, and SHA-256 before atomically replacing a managed binary.
+The installer validates macOS, Swift, and the release build, applies and verifies
+a local ad-hoc signature, then checks the CLI version protocol and SHA-256 before
+atomically replacing a managed binary. The ad-hoc signature provides local code
+integrity; it is not a Developer ID identity or notarization claim.
 It creates:
 
 ```text

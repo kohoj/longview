@@ -46,8 +46,7 @@ binary_directory=$(swift build \
     --show-bin-path)
 candidate="$binary_directory/longview"
 [ -x "$candidate" ] || longview_die "release build did not produce $candidate"
-codesign --verify --strict "$candidate" 2>/dev/null \
-    || longview_die "candidate binary has an invalid local signature"
+longview_sign_locally "$candidate"
 
 version=$(longview_binary_version "$candidate")
 [ -n "$version" ] || longview_die "candidate did not return the Longview version protocol"
