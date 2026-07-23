@@ -1,0 +1,76 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing stable tag to package (vX.Y.Z)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  source-release:
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
+      LONGVIEW_EXPECTED_ARCH: arm64
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.tag }}
+
+      - name: Validate tag and version
+        shell: zsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          print -r -- "$RELEASE_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'
+          [[ "$(git cat-file -t "$RELEASE_TAG")" == "tag" ]]
+          tag_object_sha=$(gh api \
+            "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" \
+            --jq '.object.sha')
+          [[ "$(gh api \
+            "repos/$GITHUB_REPOSITORY/git/tags/$tag_object_sha" \
+            --jq '.verification.verified')" == "true" ]]
+          git fetch --quiet origin main
+          git merge-base --is-ancestor "$RELEASE_TAG^{}" origin/main
+          scripts/verify-cli.sh
+          binary_path=$(swift build -c release --show-bin-path)/longview
+          version=$("$binary_path" version | jq -r '.result.version')
+          [[ "$RELEASE_TAG" == "v$version" ]]
+
+      - name: Build deterministic source archive
+        shell: zsh
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          version=${RELEASE_TAG#v}
+          archive="Longview-$version-source.tar.gz"
+          git archive --format=tar --prefix="Longview-$version/" "$RELEASE_TAG" | gzip -n > "$archive"
+          shasum -a 256 "$archive" > SHA256SUMS
+          print -r -- "RELEASE_ARCHIVE=$archive" >> "$GITHUB_ENV"
+
+      - name: Create draft release
+        shell: zsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" \
+            "$RELEASE_ARCHIVE" SHA256SUMS \
+            --draft \
+            --verify-tag \
+            --generate-notes \
+            --title "Longview ${RELEASE_TAG#v}"

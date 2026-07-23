@@ -1,0 +1,12 @@
+.build/
+.swiftpm/
+DerivedData/
+.DS_Store
+*.xcuserstate
+.env
+.env.*
+*.cer
+*.p12
+*.mobileprovision
+Longview-*-source.tar.gz
+SHA256SUMS
