@@ -10,6 +10,10 @@ public enum LongScreenshotProfileCatalog {
         guard let bundleIdentifier else { return false }
         return knownBundleIdentifiers.contains(bundleIdentifier)
     }
+
+    static func prefersForegroundEventRoute(_ bundleIdentifier: String?) -> Bool {
+        bundleIdentifier == "com.tencent.xinWeChat"
+    }
 }
 
 struct LongScreenshotCropLayout: Equatable {

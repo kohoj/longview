@@ -13,6 +13,9 @@ public struct CapabilityResult: Codable, Equatable, Sendable {
         public let targetScope: String
         public let targetSelectors: [String]
         public let captureRoute: String
+        public let capturePacing: String
+        public let frameSource: String
+        public let overlapPolicy: String
         public let backgroundCapture: Bool
         public let backgroundScroll: String
         public let knownProfiles: [String]
@@ -24,6 +27,7 @@ public struct CapabilityResult: Codable, Equatable, Sendable {
         public let frameRange: [Int]
         public let pulsesPerStepRange: [Int]
         public let settleMillisecondsRange: [Int]
+        public let settleMillisecondsSemantics: String
         public let outputFormat: String
         public let restoration: String
         public let limitations: [String]
@@ -114,6 +118,12 @@ public struct LongshotResult: Codable, Equatable, Sendable {
     public let viewportRestorationAttempted: Bool
     public let viewportRestorationSucceeded: Bool
     public let environmentRestorationSucceeded: Bool
+    public let focusRestorationSucceeded: Bool
+    public let pointerRestorationSucceeded: Bool
+    public let captureSource: String
+    public let elapsedMilliseconds: Int
+    public let effectivePixelsPerSecond: Int
+    public let finalPulsesPerStep: Int
 }
 
 public struct VersionResult: Codable, Equatable, Sendable {

@@ -10,6 +10,18 @@ enum WindowScrollSessionError: Error, Equatable {
     case routeUnavailable
 }
 
+struct WindowEnvironmentRestorationResult: Equatable {
+    let focusSucceeded: Bool
+    let pointerSucceeded: Bool
+
+    var succeeded: Bool { focusSucceeded && pointerSucceeded }
+
+    static let unchanged = WindowEnvironmentRestorationResult(
+        focusSucceeded: true,
+        pointerSucceeded: true
+    )
+}
+
 @MainActor
 private func uncancellableDelay(milliseconds: Int) async {
     await withCheckedContinuation { continuation in
@@ -32,7 +44,7 @@ protocol WindowScrollSession: AnyObject {
         pulses: Int
     ) async throws
     func restoreViewport() async -> Bool
-    func restoreEnvironment() async -> Bool
+    func restoreEnvironment() async -> WindowEnvironmentRestorationResult
 }
 
 @MainActor
@@ -123,11 +135,28 @@ final class AccessibilityValueScrollSession: WindowScrollSession {
                 from: scrollBar
             )
         else { throw WindowScrollSessionError.routeUnavailable }
-        let action =
-            direction == .up
-            ? (kAXDecrementAction as String)
-            : (kAXIncrementAction as String)
-        if supportedActions.contains(action) {
+        let span = maximumValue - minimumValue
+        let normalizedStep = min(0.12, max(0.005, Double(pulses) / 900))
+        let signed = direction == .up ? -1.0 : 1.0
+        let proposed = min(
+            maximumValue,
+            max(minimumValue, current + signed * normalizedStep * span)
+        )
+        guard abs(proposed - current) > 0.000_001 else {
+            throw WindowScrollSessionError.boundaryReached
+        }
+        if AXUIElementSetAttributeValue(
+            scrollBar,
+            kAXValueAttribute as CFString,
+            NSNumber(value: proposed)
+        ) != .success {
+            let action =
+                direction == .up
+                ? (kAXDecrementAction as String)
+                : (kAXIncrementAction as String)
+            guard supportedActions.contains(action) else {
+                throw WindowScrollSessionError.noEffect
+            }
             let actionCount = max(1, min(12, pulses / 4))
             for _ in 0..<actionCount {
                 try Task.checkCancellation()
@@ -139,24 +168,6 @@ final class AccessibilityValueScrollSession: WindowScrollSession {
                 else { break }
                 try await Task.sleep(for: .milliseconds(12))
             }
-        } else {
-            let span = maximumValue - minimumValue
-            let normalizedStep = min(0.05, max(0.01, Double(pulses) / 900))
-            let signed = direction == .up ? -1.0 : 1.0
-            let proposed = min(
-                maximumValue,
-                max(minimumValue, current + signed * normalizedStep * span)
-            )
-            guard abs(proposed - current) > 0.000_001 else {
-                throw WindowScrollSessionError.boundaryReached
-            }
-            guard
-                AXUIElementSetAttributeValue(
-                    scrollBar,
-                    kAXValueAttribute as CFString,
-                    NSNumber(value: proposed)
-                ) == .success
-            else { throw WindowScrollSessionError.noEffect }
         }
         try await Task.sleep(for: .milliseconds(40))
         guard
@@ -186,7 +197,9 @@ final class AccessibilityValueScrollSession: WindowScrollSession {
         return abs(restored - originalValue) <= 0.000_001
     }
 
-    func restoreEnvironment() async -> Bool { true }
+    func restoreEnvironment() async -> WindowEnvironmentRestorationResult {
+        .unchanged
+    }
 
     private struct ScrollBarCandidate {
         let element: AXUIElement
@@ -399,8 +412,7 @@ final class PIDEventScrollSession: WindowScrollSession {
     private let target: WindowCaptureTarget
     private let location: CGPoint
     private let poster = SystemScrollEventPoster()
-    private var completedSteps = 0
-    private var pulsesPerStep = 0
+    private var totalPulses = 0
     private var lastDirection = LongScreenshotDirection.up
 
     init(target: WindowCaptureTarget, normalizedScrollPoint: CGPoint) {
@@ -416,21 +428,26 @@ final class PIDEventScrollSession: WindowScrollSession {
         pulses: Int
     ) async throws {
         lastDirection = direction
-        pulsesPerStep = pulses
         try await post(
             direction: direction,
             count: pulses,
+            intervalMilliseconds:
+                totalPulses == 0
+                ? AdaptiveCapturePacer.probeEventIntervalMilliseconds
+                : AdaptiveCapturePacer.eventIntervalMilliseconds,
             honorCancellation: true
         )
-        completedSteps += 1
+        totalPulses += pulses
     }
 
     func restoreViewport() async -> Bool {
-        guard completedSteps > 0 else { return true }
+        guard totalPulses > 0 else { return true }
         do {
             try await post(
                 direction: lastDirection == .up ? .down : .up,
-                count: pulsesPerStep * completedSteps,
+                count: totalPulses,
+                intervalMilliseconds: AdaptiveCapturePacer
+                    .restorationEventIntervalMilliseconds,
                 honorCancellation: false
             )
             return true
@@ -439,11 +456,14 @@ final class PIDEventScrollSession: WindowScrollSession {
         }
     }
 
-    func restoreEnvironment() async -> Bool { true }
+    func restoreEnvironment() async -> WindowEnvironmentRestorationResult {
+        .unchanged
+    }
 
     private func post(
         direction: LongScreenshotDirection,
         count: Int,
+        intervalMilliseconds: Int,
         honorCancellation: Bool
     ) async throws {
         let magnitude = AutoScrollSpeed.fast.pixelsPerPulse
@@ -458,9 +478,13 @@ final class PIDEventScrollSession: WindowScrollSession {
                 at: location
             )
             if honorCancellation {
-                try await Task.sleep(for: .milliseconds(14))
+                try await Task.sleep(
+                    for: .milliseconds(intervalMilliseconds)
+                )
             } else {
-                await uncancellableDelay(milliseconds: 14)
+                await uncancellableDelay(
+                    milliseconds: intervalMilliseconds
+                )
             }
         }
     }
@@ -521,8 +545,7 @@ final class ForegroundEventScrollSession: WindowScrollSession {
     private let pulseController: AutoScrollPulseController
     private var scrollTarget: AutoScrollTarget?
     private var scrollLocation: CGPoint?
-    private var completedSteps = 0
-    private var pulsesPerStep = 0
+    private var totalPulses = 0
     private var lastDirection = LongScreenshotDirection.up
 
     init(target: WindowCaptureTarget) {
@@ -599,24 +622,29 @@ final class ForegroundEventScrollSession: WindowScrollSession {
     ) async throws {
         guard let scrollTarget else { throw WindowScrollSessionError.routeUnavailable }
         lastDirection = direction
-        pulsesPerStep = pulses
         try await post(
             target: scrollTarget,
             direction: direction,
             count: pulses,
+            intervalMilliseconds:
+                totalPulses == 0
+                ? AdaptiveCapturePacer.probeEventIntervalMilliseconds
+                : AdaptiveCapturePacer.eventIntervalMilliseconds,
             honorCancellation: true
         )
-        completedSteps += 1
+        totalPulses += pulses
     }
 
     func restoreViewport() async -> Bool {
-        guard completedSteps > 0, let scrollTarget else { return completedSteps == 0 }
+        guard totalPulses > 0, let scrollTarget else { return totalPulses == 0 }
         guard await reacquireRestorationLeaseIfNeeded() else { return false }
         do {
             try await post(
                 target: scrollTarget,
                 direction: lastDirection == .up ? .down : .up,
-                count: pulsesPerStep * completedSteps,
+                count: totalPulses,
+                intervalMilliseconds: AdaptiveCapturePacer
+                    .restorationEventIntervalMilliseconds,
                 honorCancellation: false
             )
             return true
@@ -649,7 +677,7 @@ final class ForegroundEventScrollSession: WindowScrollSession {
         return true
     }
 
-    func restoreEnvironment() async -> Bool {
+    func restoreEnvironment() async -> WindowEnvironmentRestorationResult {
         var focusRestored = true
         if targetWasActivated,
             let originalFrontmost,
@@ -669,24 +697,43 @@ final class ForegroundEventScrollSession: WindowScrollSession {
             CGAssociateMouseAndMouseCursorPosition(boolean_t(1))
             if pointerRestored {
                 await uncancellableDelay(milliseconds: 20)
-                if let observed = CGEvent(source: nil)?.location {
+                pointerRestored = Self.pointerMatches(
+                    originalPointer,
+                    tolerance: 2
+                )
+                if !pointerRestored {
                     pointerRestored =
-                        hypot(
-                            observed.x - originalPointer.x,
-                            observed.y - originalPointer.y
-                        ) <= 1
-                } else {
-                    pointerRestored = false
+                        CGWarpMouseCursorPosition(originalPointer) == .success
+                    CGAssociateMouseAndMouseCursorPosition(boolean_t(1))
+                    await uncancellableDelay(milliseconds: 20)
+                    pointerRestored =
+                        pointerRestored
+                        && Self.pointerMatches(
+                            originalPointer,
+                            tolerance: 2
+                        )
                 }
             }
         }
-        return pointerRestored && focusRestored
+        return WindowEnvironmentRestorationResult(
+            focusSucceeded: focusRestored,
+            pointerSucceeded: pointerRestored
+        )
+    }
+
+    private static func pointerMatches(
+        _ expected: CGPoint,
+        tolerance: CGFloat
+    ) -> Bool {
+        guard let observed = CGEvent(source: nil)?.location else { return false }
+        return hypot(observed.x - expected.x, observed.y - expected.y) <= tolerance
     }
 
     private func post(
         target: AutoScrollTarget,
         direction: LongScreenshotDirection,
         count: Int,
+        intervalMilliseconds: Int,
         honorCancellation: Bool
     ) async throws {
         for _ in 0..<count {
@@ -703,9 +750,13 @@ final class ForegroundEventScrollSession: WindowScrollSession {
                 throw LongScreenshotError.targetChanged
             }
             if honorCancellation {
-                try await Task.sleep(for: .milliseconds(14))
+                try await Task.sleep(
+                    for: .milliseconds(intervalMilliseconds)
+                )
             } else {
-                await uncancellableDelay(milliseconds: 14)
+                await uncancellableDelay(
+                    milliseconds: intervalMilliseconds
+                )
             }
         }
     }

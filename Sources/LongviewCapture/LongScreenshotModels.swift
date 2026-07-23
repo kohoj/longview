@@ -135,6 +135,12 @@ public struct LongScreenshotResult {
     public let viewportRestorationAttempted: Bool
     public let viewportRestorationSucceeded: Bool
     public let environmentRestorationSucceeded: Bool
+    public let focusRestorationSucceeded: Bool
+    public let pointerRestorationSucceeded: Bool
+    public let captureSource: String
+    public let elapsedMilliseconds: Int
+    public let effectivePixelsPerSecond: Int
+    public let finalPulsesPerStep: Int
 
     public init(
         image: CGImage,
@@ -148,7 +154,13 @@ public struct LongScreenshotResult {
         pointerWasMoved: Bool,
         viewportRestorationAttempted: Bool,
         viewportRestorationSucceeded: Bool,
-        environmentRestorationSucceeded: Bool
+        environmentRestorationSucceeded: Bool,
+        focusRestorationSucceeded: Bool = true,
+        pointerRestorationSucceeded: Bool = true,
+        captureSource: String = "screen-capture-stream",
+        elapsedMilliseconds: Int = 0,
+        effectivePixelsPerSecond: Int = 0,
+        finalPulsesPerStep: Int = 28
     ) {
         self.image = image
         self.target = target
@@ -162,6 +174,12 @@ public struct LongScreenshotResult {
         self.viewportRestorationAttempted = viewportRestorationAttempted
         self.viewportRestorationSucceeded = viewportRestorationSucceeded
         self.environmentRestorationSucceeded = environmentRestorationSucceeded
+        self.focusRestorationSucceeded = focusRestorationSucceeded
+        self.pointerRestorationSucceeded = pointerRestorationSucceeded
+        self.captureSource = captureSource
+        self.elapsedMilliseconds = elapsedMilliseconds
+        self.effectivePixelsPerSecond = effectivePixelsPerSecond
+        self.finalPulsesPerStep = finalPulsesPerStep
     }
 }
 

@@ -9,8 +9,9 @@
 
 Longview is an offline, UI-free macOS CLI that lets AI agents capture a complete
 scrollable window as one PNG. It targets a stable WindowServer window, captures
-with ScreenCaptureKit, uses bounded public scrolling APIs, stitches verified
-overlaps, and restores any state it temporarily changed.
+with a continuous ScreenCaptureKit stream, drives public scrolling APIs with a
+capture-verified adaptive pacer, stitches verified overlaps, and restores any
+state it temporarily changed.
 
 Longview is not a general computer-control framework. The runtime contains no
 network client, OCR, click, keyboard, clipboard, menu bar, or hidden private API.
@@ -78,22 +79,32 @@ probes at runtime.
 --window-id UINT32                        precise WindowServer identity
 --bundle-id ID                            target filter or default selection
 --max-frames 1...100                      default: 6
---pulses-per-step 1...240                 default: 28
+--pulses-per-step 1...240                 initial adaptive step; default: 28
 --direction up|down                       default: up
 --focus-policy background-only|
                background-first|foreground
                                            default: background-first
 --region auto|full|profile|x,y,w,h        normalized coordinates for rectangles
 --scroll-point x,y                        default: 0.65,0.5
---settle-ms 100...5000                    default: 450
+--settle-ms 100...5000                    maximum stability wait; default: 450
 --no-stop-at-end                          disable no-motion termination
 --force                                   atomically replace an existing file
 ```
 
 Generated screenshots are created with mode `0600`. Existing symlinks are
 refused. A successful result includes the selected target, scroll route, crop,
-overlaps, stop reason, activation and pointer effects, and both viewport and
-environment restoration outcomes.
+overlaps, stop reason, capture source, elapsed time, effective pixels per second,
+activation and pointer effects, and both viewport and environment restoration
+outcomes. Focus and pointer restoration are also reported independently so an
+agent can distinguish the exact residual state.
+
+Longshot pacing is closed-loop: event counts are only a tentative input. The
+continuous stream replaces fixed sleeps, but only the settled viewport is
+committed, and it must prove at least a 24% overlap. Longview accelerates when
+overlap is abundant and backs off before a gap can enter the artifact.
+
+App profiles may skip a background route already proven to be a no-op under
+`background-first`; `background-only` always performs the real background probe.
 
 ## Permissions
 

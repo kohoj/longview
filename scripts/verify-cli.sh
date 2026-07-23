@@ -116,6 +116,10 @@ jq -e '
     .type == "result" and
     .result.schemaVersion == 2 and
     .result.longshot.backgroundCapture == true and
+    .result.longshot.capturePacing == "capture-verified-adaptive" and
+    .result.longshot.frameSource == "ScreenCaptureKit.SCStream" and
+    .result.longshot.overlapPolicy == "online-validated-minimum-24-percent" and
+    .result.longshot.settleMillisecondsSemantics == "maximum-frame-stability-wait" and
     .result.longshot.defaultFocusPolicy == "background-first" and
     (.result.longshot.targetSelectors | index("window-id")) != null and
     (.result.longshot.scrollRoutes | index("accessibility-value")) != null and

@@ -31,6 +31,7 @@ public final class LongScreenshotCoordinator {
         configuration: LongScreenshotConfiguration = LongScreenshotConfiguration(),
         progress: @MainActor (LongScreenshotPhase) -> Void = { _ in }
     ) async throws -> LongScreenshotResult {
+        let startedAt = DispatchTime.now().uptimeNanoseconds
         try validate(configuration)
         guard CGPreflightScreenCaptureAccess() else {
             throw LongScreenshotError.screenCapturePermissionMissing
@@ -47,12 +48,19 @@ public final class LongScreenshotCoordinator {
             ? CGFloat(firstFrame.width) / target.frame.width
             : 1
         var frames = [firstFrame]
+        var validatedCaptureOverlaps: [Int] = []
+        var pacer = AdaptiveCapturePacer(
+            initialPulsesPerStep: configuration.pulsesPerStep
+        )
+        var captureRegion = configuration.region
         var activeSession: (any WindowScrollSession)?
         var route = LongScreenshotScrollRoute.none
         var stopReason = LongScreenshotStopReason.singleFrame
         var viewportRestorationAttempted = false
         var viewportRestorationSucceeded = true
         var environmentRestorationSucceeded = true
+        var focusRestorationSucceeded = true
+        var pointerRestorationSucceeded = true
         var targetWasActivated = false
         var pointerWasMoved = false
         progress(.capturing(current: 1, total: configuration.frameCount))
@@ -69,8 +77,22 @@ public final class LongScreenshotCoordinator {
                 )
                 activeSession = selection.session
                 route = selection.session?.route ?? .none
-                if let secondFrame = selection.movedFrame {
+                if let secondFrame = selection.movedFrame,
+                    let analysis = selection.movedAnalysis
+                {
                     frames.append(secondFrame)
+                    validatedCaptureOverlaps.append(analysis.overlap)
+                    captureRegion = freezeAutomaticRegion(
+                        requestedRegion: configuration.region,
+                        bundleIdentifier: target.bundleIdentifier,
+                        before: firstFrame,
+                        after: secondFrame,
+                        pointPixelScale: pointPixelScale
+                    )
+                    pacer.observe(
+                        overlap: analysis.overlap,
+                        viewportHeight: analysis.viewportHeight
+                    )
                     progress(
                         .capturing(
                             current: frames.count,
@@ -85,31 +107,43 @@ public final class LongScreenshotCoordinator {
                 if let activeSession, !selection.reachedBoundary {
                     while frames.count < configuration.frameCount {
                         try Task.checkCancellation()
+                        let checkpoint = captureSession.checkpoint()
                         do {
                             try await activeSession.step(
                                 direction: configuration.direction,
-                                pulses: configuration.pulsesPerStep
+                                pulses: pacer.pulsesPerStep
                             )
                         } catch WindowScrollSessionError.boundaryReached {
                             stopReason = .endReached
                             break
                         }
-                        try await settle(configuration.settleMilliseconds)
-                        let next = try await captureSession.capture()
-                        if configuration.stopAtEnd,
-                            !stitcher.hasPlausibleMotion(
+                        guard
+                            let verified = try await captureVerifiedFrame(
+                                captureSession: captureSession,
+                                checkpoint: checkpoint,
                                 before: frames.last!,
-                                after: next,
+                                maximumWaitMilliseconds: configuration.settleMilliseconds,
+                                quietWindowMilliseconds: quietWindow(
+                                    for: activeSession.route
+                                ),
                                 direction: configuration.direction,
-                                region: configuration.region,
+                                region: captureRegion,
                                 bundleIdentifier: target.bundleIdentifier,
                                 pointPixelScale: pointPixelScale
                             )
-                        {
-                            stopReason = .endReached
-                            break
+                        else {
+                            if configuration.stopAtEnd {
+                                stopReason = .endReached
+                                break
+                            }
+                            throw LongScreenshotError.overlapUnavailable
                         }
-                        frames.append(next)
+                        frames.append(verified.image)
+                        validatedCaptureOverlaps.append(verified.analysis.overlap)
+                        pacer.observe(
+                            overlap: verified.analysis.overlap,
+                            viewportHeight: verified.analysis.viewportHeight
+                        )
                         progress(
                             .capturing(
                                 current: frames.count,
@@ -127,10 +161,13 @@ public final class LongScreenshotCoordinator {
                 pointerWasMoved = activeSession.pointerWasMoved
                 viewportRestorationAttempted = configuration.frameCount > 1
                 progress(.restoringViewport)
+                let restorationCheckpoint = captureSession.checkpoint()
                 viewportRestorationSucceeded = await activeSession.restoreViewport()
                 if viewportRestorationSucceeded {
-                    try await settle(configuration.settleMilliseconds)
-                    if let restoredFrame = try? await captureSession.capture() {
+                    if let restoredFrame = try? await captureSession.captureAfterMutation(
+                        checkpoint: restorationCheckpoint,
+                        maximumWaitMilliseconds: configuration.settleMilliseconds
+                    ) {
                         viewportRestorationSucceeded = stitcher.hasMatchingViewport(
                             before: firstFrame,
                             after: restoredFrame
@@ -140,16 +177,28 @@ public final class LongScreenshotCoordinator {
                     }
                 }
                 progress(.restoringEnvironment)
-                environmentRestorationSucceeded = await activeSession.restoreEnvironment()
+                let environmentRestoration = await activeSession.restoreEnvironment()
+                focusRestorationSucceeded = environmentRestoration.focusSucceeded
+                pointerRestorationSucceeded = environmentRestoration.pointerSucceeded
+                environmentRestorationSucceeded = environmentRestoration.succeeded
             }
 
+            await captureSession.stop()
             progress(.stitching)
             let stitched = try stitcher.stitch(
                 capturedFrames: frames,
                 direction: configuration.direction,
-                region: configuration.region,
+                region: captureRegion,
                 bundleIdentifier: target.bundleIdentifier,
-                pointPixelScale: pointPixelScale
+                pointPixelScale: pointPixelScale,
+                validatedCaptureOverlaps: validatedCaptureOverlaps
+            )
+            let elapsedMilliseconds = max(
+                1,
+                Int(
+                    (DispatchTime.now().uptimeNanoseconds - startedAt)
+                        / 1_000_000
+                )
             )
             return LongScreenshotResult(
                 image: stitched.image,
@@ -163,13 +212,23 @@ public final class LongScreenshotCoordinator {
                 pointerWasMoved: pointerWasMoved,
                 viewportRestorationAttempted: viewportRestorationAttempted,
                 viewportRestorationSucceeded: viewportRestorationSucceeded,
-                environmentRestorationSucceeded: environmentRestorationSucceeded
+                environmentRestorationSucceeded: environmentRestorationSucceeded,
+                focusRestorationSucceeded: focusRestorationSucceeded,
+                pointerRestorationSucceeded: pointerRestorationSucceeded,
+                captureSource: captureSession.sourceName,
+                elapsedMilliseconds: elapsedMilliseconds,
+                effectivePixelsPerSecond: Int(
+                    (Double(stitched.image.height) * 1_000)
+                        / Double(elapsedMilliseconds)
+                ),
+                finalPulsesPerStep: pacer.pulsesPerStep
             )
         } catch {
             if let activeSession {
                 _ = await activeSession.restoreViewport()
                 _ = await activeSession.restoreEnvironment()
             }
+            await captureSession.stop()
             throw error
         }
     }
@@ -177,7 +236,13 @@ public final class LongScreenshotCoordinator {
     private struct RouteSelection {
         let session: (any WindowScrollSession)?
         let movedFrame: CGImage?
+        let movedAnalysis: LongScreenshotMotionAnalysis?
         let reachedBoundary: Bool
+    }
+
+    private struct VerifiedFrame {
+        let image: CGImage
+        let analysis: LongScreenshotMotionAnalysis
     }
 
     private func selectRoute(
@@ -196,7 +261,7 @@ public final class LongScreenshotCoordinator {
         {
             progress(.probingRoute(.accessibilityValue))
             do {
-                let frame = try await probe(
+                let verified = try await probe(
                     session: accessibility,
                     target: target,
                     configuration: configuration,
@@ -206,44 +271,53 @@ public final class LongScreenshotCoordinator {
                 )
                 return RouteSelection(
                     session: accessibility,
-                    movedFrame: frame,
+                    movedFrame: verified.image,
+                    movedAnalysis: verified.analysis,
                     reachedBoundary: false
                 )
             } catch WindowScrollSessionError.boundaryReached {
                 return RouteSelection(
                     session: accessibility,
                     movedFrame: nil,
+                    movedAnalysis: nil,
                     reachedBoundary: true
                 )
             } catch {
                 _ = await accessibility.restoreViewport()
-                try await settle(configuration.settleMilliseconds)
+                try await settle(AdaptiveCapturePacer.quietFrameWindowMilliseconds)
             }
         }
 
-        if configuration.focusPolicy != .foreground {
+        let shouldProbePIDEvent =
+            configuration.focusPolicy == .backgroundOnly
+            || !LongScreenshotProfileCatalog.prefersForegroundEventRoute(
+                target.bundleIdentifier
+            )
+        if configuration.focusPolicy != .foreground, shouldProbePIDEvent {
             let pidSession = PIDEventScrollSession(
                 target: target,
                 normalizedScrollPoint: configuration.normalizedScrollPoint
             )
             progress(.probingRoute(.pidEvent))
             do {
-                let frame = try await probe(
+                let verified = try await probe(
                     session: pidSession,
                     target: target,
                     configuration: configuration,
                     captureSession: captureSession,
                     initialFrame: initialFrame,
-                    pointPixelScale: pointPixelScale
+                    pointPixelScale: pointPixelScale,
+                    pulses: min(configuration.pulsesPerStep, 12)
                 )
                 return RouteSelection(
                     session: pidSession,
-                    movedFrame: frame,
+                    movedFrame: verified.image,
+                    movedAnalysis: verified.analysis,
                     reachedBoundary: false
                 )
             } catch {
                 _ = await pidSession.restoreViewport()
-                try await settle(configuration.settleMilliseconds)
+                try await settle(AdaptiveCapturePacer.quietFrameWindowMilliseconds)
             }
         }
 
@@ -258,7 +332,7 @@ public final class LongScreenshotCoordinator {
         )
         progress(.probingRoute(.foregroundEvent))
         do {
-            let frame = try await probe(
+            let verified = try await probe(
                 session: foreground,
                 target: target,
                 configuration: configuration,
@@ -268,7 +342,8 @@ public final class LongScreenshotCoordinator {
             )
             return RouteSelection(
                 session: foreground,
-                movedFrame: frame,
+                movedFrame: verified.image,
+                movedAnalysis: verified.analysis,
                 reachedBoundary: false
             )
         } catch {
@@ -278,6 +353,7 @@ public final class LongScreenshotCoordinator {
                 return RouteSelection(
                     session: foreground,
                     movedFrame: nil,
+                    movedAnalysis: nil,
                     reachedBoundary: true
                 )
             }
@@ -293,25 +369,115 @@ public final class LongScreenshotCoordinator {
         configuration: LongScreenshotConfiguration,
         captureSession: WindowCaptureSession,
         initialFrame: CGImage,
-        pointPixelScale: CGFloat
-    ) async throws -> CGImage {
+        pointPixelScale: CGFloat,
+        pulses: Int? = nil
+    ) async throws -> VerifiedFrame {
+        let checkpoint = captureSession.checkpoint()
         try await session.step(
             direction: configuration.direction,
-            pulses: configuration.pulsesPerStep
+            pulses: pulses ?? configuration.pulsesPerStep
         )
-        try await settle(configuration.settleMilliseconds)
-        let candidate = try await captureSession.capture()
         guard
-            stitcher.hasPlausibleMotion(
+            let verified = try await captureVerifiedFrame(
+                captureSession: captureSession,
+                checkpoint: checkpoint,
                 before: initialFrame,
-                after: candidate,
+                maximumWaitMilliseconds: min(
+                    configuration.settleMilliseconds,
+                    AdaptiveCapturePacer.routeProbeWaitMilliseconds
+                ),
+                quietWindowMilliseconds: quietWindow(for: session.route),
                 direction: configuration.direction,
                 region: configuration.region,
                 bundleIdentifier: target.bundleIdentifier,
                 pointPixelScale: pointPixelScale
             )
         else { throw WindowScrollSessionError.noEffect }
-        return candidate
+        return verified
+    }
+
+    private func captureVerifiedFrame(
+        captureSession: WindowCaptureSession,
+        checkpoint: UInt64,
+        before: CGImage,
+        maximumWaitMilliseconds: Int,
+        quietWindowMilliseconds: Int,
+        direction: LongScreenshotDirection,
+        region: LongScreenshotRegion,
+        bundleIdentifier: String?,
+        pointPixelScale: CGFloat
+    ) async throws -> VerifiedFrame? {
+        let candidate = try await captureSession.captureAfterMutation(
+            checkpoint: checkpoint,
+            maximumWaitMilliseconds: maximumWaitMilliseconds,
+            quietWindowMilliseconds: quietWindowMilliseconds
+        )
+        // Only the settled viewport may be committed. An intermediate stream
+        // frame no longer represents the session's actual scroll position and
+        // would make the next transition discontinuous.
+        guard
+            let analysis = stitcher.analyzeMotion(
+                before: before,
+                after: candidate,
+                direction: direction,
+                region: region,
+                bundleIdentifier: bundleIdentifier,
+                pointPixelScale: pointPixelScale
+            )
+        else {
+            if stitcher.hasMatchingViewport(before: before, after: candidate) {
+                return nil
+            }
+            throw LongScreenshotError.overlapUnavailable
+        }
+        guard
+            analysis.overlap
+                >= AdaptiveCapturePacer.minimumSafeOverlap(
+                    viewportHeight: analysis.viewportHeight
+                )
+        else { throw LongScreenshotError.overlapUnavailable }
+        return VerifiedFrame(image: candidate, analysis: analysis)
+    }
+
+    private func quietWindow(
+        for route: LongScreenshotScrollRoute
+    ) -> Int {
+        switch route {
+        case .pidEvent, .foregroundEvent:
+            AdaptiveCapturePacer.eventQuietFrameWindowMilliseconds
+        case .accessibilityValue, .none:
+            AdaptiveCapturePacer.quietFrameWindowMilliseconds
+        }
+    }
+
+    private func freezeAutomaticRegion(
+        requestedRegion: LongScreenshotRegion,
+        bundleIdentifier: String?,
+        before: CGImage,
+        after: CGImage,
+        pointPixelScale: CGFloat
+    ) -> LongScreenshotRegion {
+        guard requestedRegion == .automatic,
+            !LongScreenshotProfileCatalog.contains(bundleIdentifier),
+            let layout = try? LongScreenshotLayoutResolver.layout(
+                bundleIdentifier: bundleIdentifier,
+                pixelWidth: before.width,
+                pixelHeight: before.height,
+                pointPixelScale: pointPixelScale,
+                region: .automatic,
+                comparisonFrames: [before, after]
+            )
+        else { return requestedRegion }
+        let width = CGFloat(before.width)
+        let height = CGFloat(before.height)
+        return .normalized(
+            CGRect(
+                x: layout.transcript.minX / width,
+                y: layout.transcript.minY / height,
+                width: layout.transcript.width / width,
+                height: layout.transcript.height / height
+            )
+        )
     }
 
     private func settle(_ milliseconds: Int) async throws {
